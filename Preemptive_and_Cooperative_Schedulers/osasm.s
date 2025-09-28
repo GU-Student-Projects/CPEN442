@@ -26,13 +26,14 @@
         THUMB
         REQUIRE8
         PRESERVE8
+
         EXTERN  RunPt            ; currently running thread
+        EXTERN  Scheduler        ; C function to select next thread
         EXPORT  OS_DisableInterrupts
         EXPORT  OS_EnableInterrupts
         EXPORT  StartOS
         EXPORT  SysTick_Handler
-        EXPORT  StartCritical    
-        EXPORT  EndCritical      
+        EXPORT  PendSV_Handler
 
 OS_DisableInterrupts
         CPSID   I
@@ -41,41 +42,61 @@ OS_DisableInterrupts
 OS_EnableInterrupts
         CPSIE   I
         BX      LR
-		
-StartCritical
-        MRS     R0, PRIMASK      ; save old status
-        CPSID   I                ; disable interrupts
-        BX      LR
-
-EndCritical
-        MSR     PRIMASK, R0      ; restore old status
-        BX      LR
-
-SysTick_Handler                ; 1) Saves R0-R3,R12,LR,PC,PSR
-    CPSID   I                  ; 2) Prevent interrupt during switch
-    PUSH    {R4-R11}           ; 3) Save remaining regs r4-11
-    LDR     R0, =RunPt         ; 4) R0=pointer to RunPt, old thread
-    LDR     R1, [R0]           ;    R1 = RunPt
-    STR     SP, [R1]           ; 5) Save SP into TCB
-    LDR     R1, [R1,#4]        ; 6) R1 = RunPt->next
-    STR     R1, [R0]           ;    RunPt = R1
-    LDR     SP, [R1]           ; 7) new thread SP; SP = RunPt->sp;
-    POP     {R4-R11}           ; 8) restore regs r4-11
-    CPSIE   I                  ; 9) tasks run with interrupts enabled
-    BX      LR                 ; 10) restore R0-R3,R12,LR,PC,PSR
 
 StartOS
-    LDR     R0, =RunPt         ; currently running thread
-    LDR     R2, [R0]           ; R2 = value of RunPt
-    LDR     SP, [R2]           ; new thread SP; SP = RunPt->stackPointer;
-    POP     {R4-R11}           ; restore regs r4-11
-    POP     {R0-R3}            ; restore regs r0-3
-    POP     {R12}
-    POP     {LR}               ; discard LR from initial stack
-    POP     {LR}               ; start location
-    POP     {R1}               ; discard PSR
-    CPSIE   I                  ; Enable interrupts at processor level
-    BX      LR                 ; start first thread
+        LDR     R0, =RunPt         ; currently running thread
+        LDR     R1, [R0]           ; R1 = value of RunPt
+        LDR     SP, [R1]           ; new thread SP; SP = RunPt->sp;
+        POP     {R4-R11}           ; restore regs R4-11
+        POP     {R0-R3}            ; restore regs R0-3
+        POP     {R12}
+        ADD     SP, SP, #4         ; discard LR from initial stack
+        POP     {LR}               ; start location
+        ADD     SP, SP, #4         ; discard PSR
+        CPSIE   I                  ; Enable interrupts at processor level
+        BX      LR                 ; start first thread
 
-    ALIGN
-    END
+; SysTick_Handler - Called every time slice
+; Saves context, calls scheduler, restores context
+SysTick_Handler
+        CPSID   I                  ; Prevent interrupt during switch
+        PUSH    {R4-R11}           ; Save remaining regs r4-11
+        LDR     R0, =RunPt         ; R0 = pointer to RunPt, old thread
+        LDR     R1, [R0]           ; R1 = RunPt
+        STR     SP, [R1]           ; Save SP into TCB
+        
+        ; Call Scheduler to get next thread
+        PUSH    {R0, LR}
+        BL      Scheduler          ; Returns next thread in R0
+        POP     {R1, LR}
+        STR     R0, [R1]           ; RunPt = R0 (next thread)
+        
+        LDR     R1, [R1]           ; R1 = RunPt, new thread
+        LDR     SP, [R1]           ; new thread SP; SP = RunPt->sp;
+        POP     {R4-R11}           ; restore regs r4-11
+        CPSIE   I                  ; interrupts enabled
+        BX      LR                 ; restore R0-R3,R12,LR,PC,PSR
+
+; PendSV_Handler - Used for context switch in OS_Suspend
+; Lower priority than SysTick
+PendSV_Handler
+        CPSID   I                  ; Prevent interrupt during switch
+        PUSH    {R4-R11}           ; Save remaining regs r4-11
+        LDR     R0, =RunPt         ; R0 = pointer to RunPt, old thread
+        LDR     R1, [R0]           ; R1 = RunPt
+        STR     SP, [R1]           ; Save SP into TCB
+        
+        ; Call Scheduler to get next thread
+        PUSH    {R0, LR}
+        BL      Scheduler          ; Returns next thread in R0
+        POP     {R1, LR}
+        STR     R0, [R1]           ; RunPt = R0 (next thread)
+        
+        LDR     R1, [R1]           ; R1 = RunPt, new thread
+        LDR     SP, [R1]           ; new thread SP; SP = RunPt->sp;
+        POP     {R4-R11}           ; restore regs r4-11
+        CPSIE   I                  ; interrupts enabled
+        BX      LR                 ; restore R0-R3,R12,LR,PC,PSR
+
+        ALIGN
+        END
