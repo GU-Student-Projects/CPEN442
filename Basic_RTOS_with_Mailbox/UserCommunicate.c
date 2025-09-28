@@ -26,6 +26,8 @@ void Task1(void){
     if (Count1 == 750){  // Periodically read switches and send
       Switches_in = (GPIO_PORTD_DATA_R & 0x0E);  // Read PD3-1
       SendMail(Switches_in);  // Send to mailbox
+			SendMail(Switches_in);  // Second send (will cause loss)
+
       Count1 = 0;
     }
   }

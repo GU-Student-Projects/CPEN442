@@ -22,28 +22,34 @@
 ; For more information about my classes, my research, and my books, see
 ; http://users.ece.utexas.edu/~valvano/
 ; */
-
         AREA |.text|, CODE, READONLY, ALIGN=2
         THUMB
         REQUIRE8
         PRESERVE8
-
         EXTERN  RunPt            ; currently running thread
         EXPORT  OS_DisableInterrupts
         EXPORT  OS_EnableInterrupts
         EXPORT  StartOS
         EXPORT  SysTick_Handler
-
+        EXPORT  StartCritical    
+        EXPORT  EndCritical      
 
 OS_DisableInterrupts
         CPSID   I
         BX      LR
 
-
 OS_EnableInterrupts
         CPSIE   I
         BX      LR
+		
+StartCritical
+        MRS     R0, PRIMASK      ; save old status
+        CPSID   I                ; disable interrupts
+        BX      LR
 
+EndCritical
+        MSR     PRIMASK, R0      ; restore old status
+        BX      LR
 
 SysTick_Handler                ; 1) Saves R0-R3,R12,LR,PC,PSR
     CPSID   I                  ; 2) Prevent interrupt during switch

@@ -53,3 +53,11 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+Listings/
+Objects/
+RTE/
+*.uvguix*
+*.uvprojx
+*.uvoptx
+*.scvd
