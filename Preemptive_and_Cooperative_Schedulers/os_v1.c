@@ -165,11 +165,9 @@ tcbType* Scheduler(void){
   nextPt = pt->next;    // Start looking at next thread
   
   // Find next non-blocked thread
-  while(nextPt->blockPt != 0){  // Skip blocked threads
+  while(nextPt->blockPt != 0){
     nextPt = nextPt->next;
-    if(nextPt == pt){  // We've checked all threads
-      // If all threads are blocked, stay with current
-      // This shouldn't happen in a well-designed system
+    if(nextPt == pt){
       return pt;
     }
   }
