@@ -1,346 +1,292 @@
+// *****************************************************************************
+// os.c - Real-Time Operating System Implementation
+// Runs on LM4F120/TM4C123
+// A simple real time operating system with minimal features
+// 
+// *****************************************************************************
+
 #include <stdint.h>
-#include "tm4c123gh6pm.h"
-#include "tm4c123gh6pm_def.h"
+#include "os.h"
+#include "TM4C123GH6PM.h"
 
-// OS Configuration
-#define NUMTHREADS  6        // Maximum number of threads
-#define STACKSIZE   256      // Number of 32-bit words in stack
-#define FIFOSIZE    10       // Size of color FIFO queue
-#define TIMESLICE   32000    // 2ms at 16MHz (16MHz * 0.002s)
+// =============================================================================
+// PRIVATE FUNCTION PROTOTYPES
+// =============================================================================
+static void SetInitialStack(int threadIndex);
+static void Clock_Init(void);
+void Scheduler(void);           // Called from assembly (osasm.s)
 
-// System Registers
-#define NVIC_ST_CTRL_R          (*((volatile uint32_t *)0xE000E010))
-#define NVIC_ST_RELOAD_R        (*((volatile uint32_t *)0xE000E014))
-#define NVIC_ST_CURRENT_R       (*((volatile uint32_t *)0xE000E018))
-#define NVIC_SYS_PRI3_R         (*((volatile uint32_t *)0xE000ED20))
-#define NVIC_ST_CTRL_CLK_SRC    0x00000004
-#define NVIC_ST_CTRL_INTEN      0x00000002
-#define NVIC_ST_CTRL_ENABLE     0x00000001
+// =============================================================================
+// GLOBAL VARIABLES
+// =============================================================================
+tcbType tcbs[NUMTHREADS];                   // Thread control blocks
+tcbType *RunPt;                             // Pointer to currently running thread
+int32_t Stacks[NUMTHREADS][STACKSIZE];     // Thread stacks
 
-// Thread Control Block
-struct tcb {
-    int32_t *sp;
-    struct tcb *next;
-    uint32_t sleepCount;
-    uint32_t blockSemaPt;
-    uint32_t id;
-    uint32_t priority;
-};
-typedef struct tcb tcbType;
+// FIFO variables
+static uint32_t PutI;                       // Index for next put
+static uint32_t GetI;                       // Index for next get
+static uint32_t Fifo[FIFOSIZE];            // FIFO buffer
+int32_t CurrentSize;                        // Semaphore: current FIFO size
+uint32_t LostData;                          // Count of lost data (overflow)
 
-// Semaphore structure
-struct sema {
-    int32_t value;        
-    tcbType *blockedList;
-};
-typedef struct sema Sema4Type;
+// =============================================================================
+// OS INITIALIZATION
+// =============================================================================
 
-// Global OS variables
-tcbType tcbs[NUMTHREADS];
-tcbType *RunPt;
-tcbType *NextPt;
-int32_t Stacks[NUMTHREADS][STACKSIZE];
-uint32_t NumThreads;
-static uint32_t MSTime;
-
-// Color FIFO structure
-struct colorFifo {
-    uint8_t buffer[FIFOSIZE];
-    uint8_t *putPt;      
-    uint8_t *getPt;
-    Sema4Type currentSize;
-    Sema4Type roomLeft; 
-    Sema4Type mutex;
-};
-typedef struct colorFifo ColorFifoType;
-
-// Global FIFO for colors
-ColorFifoType ColorQueue;
-
-// Function prototypes from assembly
-void OS_DisableInterrupts(void); // Disable interrupts
-void OS_EnableInterrupts(void);  // Enable interrupts
-int32_t StartCritical(void);
-void EndCritical(int32_t primask);
-void Clock_Init(void);
-void StartOS(void);
-
-// Initialize stack for thread
-void SetInitialStack(uint32_t i) {
-    tcbs[i].sp = &Stacks[i][STACKSIZE-16]; // thread stack pointer
-    Stacks[i][STACKSIZE-1] = 0x01000000;  // Thumb bit
-    Stacks[i][STACKSIZE-3] = 0x14141414;  // R14
-    Stacks[i][STACKSIZE-4] = 0x12121212;  // R12
-    Stacks[i][STACKSIZE-5] = 0x03030303;  // R3
-    Stacks[i][STACKSIZE-6] = 0x02020202;  // R2
-    Stacks[i][STACKSIZE-7] = 0x01010101;  // R1
-    Stacks[i][STACKSIZE-8] = 0x00000000;  // R0
-    Stacks[i][STACKSIZE-9] = 0x11111111;  // R11
-    Stacks[i][STACKSIZE-10] = 0x10101010; // R10
-    Stacks[i][STACKSIZE-11] = 0x09090909; // R9
-    Stacks[i][STACKSIZE-12] = 0x08080808; // R8
-    Stacks[i][STACKSIZE-13] = 0x07070707; // R7
-    Stacks[i][STACKSIZE-14] = 0x06060606; // R6
-    Stacks[i][STACKSIZE-15] = 0x05050505; // R5
-    Stacks[i][STACKSIZE-16] = 0x04040404; // R4
-}
-
-// ******** OS_Init ************
-// Initialize operating system
+/**
+ * @brief Initialize operating system
+ */
 void OS_Init(void) {
     OS_DisableInterrupts();
-    // Initialize PLL for 16 MHz
-    SYSCTL_RCC_R |= 0x00000800;   // BYPASS PLL
-    SYSCTL_RCC_R &= ~0x00400000;  // Clear USESYSDIV
-    
-    MSTime = 0;
-    NumThreads = 0;
+    Clock_Init();                           // Set processor clock to 16 MHz
     
     // Configure SysTick
-    NVIC_ST_CTRL_R = 0;         // Disable SysTick during setup
-    NVIC_ST_CURRENT_R = 0;      // Any write to current clears it
-    // Set SysTick priority to 7 (lowest)
-    NVIC_SYS_PRI3_R = (NVIC_SYS_PRI3_R & 0x00FFFFFF) | 0xE0000000;
+    NVIC_ST_CTRL_R = 0;                    // Disable SysTick during setup
+    NVIC_ST_CURRENT_R = 0;                 // Clear current value
+    NVIC_SYS_PRI3_R = (NVIC_SYS_PRI3_R & 0x00FFFFFF) | 0xE0000000; // Priority 7
 }
 
-// ******** OS_AddThread ************
-// Add a thread to the scheduler
-// Input: pointer to thread function, thread ID, initial stack size
-// Output: 1 if successful, 0 if failed
-int OS_AddThread(void(*task)(void), uint32_t id, uint32_t stackSize) {
+/**
+ * @brief Initialize clock to 16 MHz using main oscillator
+ */
+static void Clock_Init(void) {
+    SYSCTL_RCC_R |= 0x00000810;            // Set BYPASS and use main OSC
+    SYSCTL_RCC_R &= ~0x00400020;           // Clear USESYSDIV and OSCSRC bits
+}
+
+// =============================================================================
+// THREAD MANAGEMENT
+// =============================================================================
+
+/**
+ * @brief Initialize stack for a new thread
+ * @param threadIndex Index of thread (0 to NUMTHREADS-1)
+ */
+static void SetInitialStack(int threadIndex) {
+    tcbs[threadIndex].sp = &Stacks[threadIndex][STACKSIZE - 16]; // Set SP
+    
+    // Initialize stack frame for context switch
+    Stacks[threadIndex][STACKSIZE - 1]  = 0x01000000;   // PSR (Thumb bit set)
+    Stacks[threadIndex][STACKSIZE - 3]  = 0x14141414;   // R14 (LR)
+    Stacks[threadIndex][STACKSIZE - 4]  = 0x12121212;   // R12
+    Stacks[threadIndex][STACKSIZE - 5]  = 0x03030303;   // R3
+    Stacks[threadIndex][STACKSIZE - 6]  = 0x02020202;   // R2
+    Stacks[threadIndex][STACKSIZE - 7]  = 0x01010101;   // R1
+    Stacks[threadIndex][STACKSIZE - 8]  = 0x00000000;   // R0
+    Stacks[threadIndex][STACKSIZE - 9]  = 0x11111111;   // R11
+    Stacks[threadIndex][STACKSIZE - 10] = 0x10101010;   // R10
+    Stacks[threadIndex][STACKSIZE - 11] = 0x09090909;   // R9
+    Stacks[threadIndex][STACKSIZE - 12] = 0x08080808;   // R8
+    Stacks[threadIndex][STACKSIZE - 13] = 0x07070707;   // R7
+    Stacks[threadIndex][STACKSIZE - 14] = 0x06060606;   // R6
+    Stacks[threadIndex][STACKSIZE - 15] = 0x05050505;   // R5
+    Stacks[threadIndex][STACKSIZE - 16] = 0x04040404;   // R4
+}
+
+/**
+ * @brief Add three threads to the scheduler
+ */
+int OS_AddThreads(void(*task0)(void),
+                  void(*task1)(void),
+                  void(*task2)(void)) {
     int32_t status;
+    
     status = StartCritical();
     
-    if(NumThreads >= NUMTHREADS) {
-        EndCritical(status);
-        return 0; // No room for more threads
-    }
+    // Create circular linked list
+    tcbs[0].next = &tcbs[1];
+    tcbs[1].next = &tcbs[2];
+    tcbs[2].next = &tcbs[0];
     
-    // Initialize TCB
-    tcbs[NumThreads].id = id;
-    tcbs[NumThreads].sleepCount = 0;
-    tcbs[NumThreads].blockSemaPt = 0;
-    tcbs[NumThreads].priority = 0;
+    // Initialize stacks and set PC for each thread
+    SetInitialStack(0);
+    Stacks[0][STACKSIZE - 2] = (int32_t)(task0);  // PC
     
-    SetInitialStack(NumThreads);
-    Stacks[NumThreads][STACKSIZE-2] = (int32_t)(task); // PC
+    SetInitialStack(1);
+    Stacks[1][STACKSIZE - 2] = (int32_t)(task1);  // PC
     
-    if(NumThreads == 0) {
-        tcbs[0].next = &tcbs[0]; // Point to self if only thread
-        RunPt = &tcbs[0];
-    } else {
-        // Insert into circular linked list
-        tcbs[NumThreads].next = tcbs[NumThreads-1].next;
-        tcbs[NumThreads-1].next = &tcbs[NumThreads];
-    }
+    SetInitialStack(2);
+    Stacks[2][STACKSIZE - 2] = (int32_t)(task2);  // PC
     
-    NumThreads++;
+    // Initialize thread states
+    tcbs[0].blocked = 0;
+    tcbs[0].sleep = 0;
+    tcbs[1].blocked = 0;
+    tcbs[1].sleep = 0;
+    tcbs[2].blocked = 0;
+    tcbs[2].sleep = 0;
+    
+    RunPt = &tcbs[0];  // Thread 0 runs first
+    
     EndCritical(status);
-    return 1;
+    return 1;  // Success
 }
 
-// ******** OS_Launch ************
-// Start the scheduler
+/**
+ * @brief Launch the operating system
+ */
 void OS_Launch(uint32_t theTimeSlice) {
-    NVIC_ST_RELOAD_R = theTimeSlice - 1; // Reload value
-    NVIC_ST_CTRL_R = 0x00000007; // Enable with core clock and interrupts
-    StartOS();                    // Assembly routine to start first thread
+    NVIC_ST_RELOAD_R = theTimeSlice - 1;   // Set reload value
+    NVIC_ST_CTRL_R = 0x00000007;           // Enable SysTick, core clock, interrupt
+    StartOS();                              // Start first task (defined in osasm.s)
 }
 
-// ******** OS_Sleep ************
-// Put thread to sleep for specified time
-// Input: sleep time in milliseconds
-void OS_Sleep(uint32_t sleepTime) {
-    RunPt->sleepCount = sleepTime; // Set sleep counter
-    OS_Suspend();                   // Give up CPU
-}
-
-// ******** OS_Suspend ************
-// Suspend current thread and run scheduler
+/**
+ * @brief Force context switch by triggering SysTick
+ */
 void OS_Suspend(void) {
-    // Trigger SysTick to perform context switch
-    NVIC_ST_CURRENT_R = 0; // Any write to current triggers SysTick
+    NVIC_ST_CURRENT_R = 0;                 // Reset counter
+    NVIC_INT_CTRL_R |= 0x04000000;         // Trigger SysTick interrupt
 }
 
-// ******** OS_InitSemaphore ************
-// Initialize counting semaphore
+/**
+ * @brief Put current thread to sleep
+ */
+void OS_Sleep(uint32_t sleepTime) {
+    RunPt->sleep = (int32_t)sleepTime;
+    OS_Suspend();  // Give up CPU
+}
+
+// =============================================================================
+// SCHEDULER
+// =============================================================================
+
+/**
+ * @brief Round-robin scheduler with sleep and blocking support
+ * @note Called from SysTick_Handler in osasm.s
+ */
+void Scheduler(void) {
+    tcbType *pt;
+    
+    // Decrement sleep counters for all threads
+    pt = RunPt;
+    for (int i = 0; i < NUMTHREADS; i++) {
+        if (pt->sleep > 0) {
+            pt->sleep--;
+        }
+        pt = pt->next;
+    }
+    
+    // Find next ready thread (not blocked and not sleeping)
+    RunPt = RunPt->next;
+    while ((RunPt->blocked != 0) || (RunPt->sleep > 0)) {
+        RunPt = RunPt->next;
+    }
+}
+
+// =============================================================================
+// SEMAPHORE IMPLEMENTATION
+// =============================================================================
+
+/**
+ * @brief Initialize semaphore
+ */
 void OS_InitSemaphore(Sema4Type *semaPt, int32_t value) {
-    OS_DisableInterrupts();
-    semaPt->value = value;
-    semaPt->blockedList = 0;
-    OS_EnableInterrupts();
+    int32_t status;
+    
+    status = StartCritical();
+    *semaPt = value;
+    EndCritical(status);
 }
 
-// ******** OS_Wait ************
-// Decrement semaphore, block if less than zero
+/**
+ * @brief Wait on semaphore (P operation, blocking)
+ */
 void OS_Wait(Sema4Type *semaPt) {
     OS_DisableInterrupts();
-    (semaPt->value)--;
     
-    if(semaPt->value < 0) {
+    (*semaPt) = (*semaPt) - 1;
+    
+    if ((*semaPt) < 0) {
         // Block this thread
-        RunPt->blockSemaPt = (uint32_t)semaPt;
-        
-        // Add to blocked list
-        tcbType *pt = semaPt->blockedList;
-        if(pt == 0) {
-            semaPt->blockedList = RunPt;
-        } else {
-            while(pt->next != 0) {
-                pt = pt->next;
-            }
-            pt->next = RunPt;
-        }
-        
+        RunPt->blocked = (uint32_t *)semaPt;
         OS_EnableInterrupts();
-        OS_Suspend(); // Switch threads
+        OS_Suspend();  // Switch to another thread
     } else {
         OS_EnableInterrupts();
     }
 }
 
-// ******** OS_Signal ************
-// Increment semaphore, wake up blocked thread if any
+/**
+ * @brief Signal semaphore (V operation, unblocking)
+ */
 void OS_Signal(Sema4Type *semaPt) {
     tcbType *pt;
     
     OS_DisableInterrupts();
-    (semaPt->value)++;
     
-    if(semaPt->value <= 0) {
+    (*semaPt) = (*semaPt) + 1;
+    
+    if ((*semaPt) <= 0) {
         // Wake up one blocked thread
-        pt = semaPt->blockedList;
-        if(pt != 0) {
-            semaPt->blockedList = pt->next;
-            pt->blockSemaPt = 0; // No longer blocked
+        pt = RunPt->next;
+        
+        while (pt->blocked != (uint32_t *)semaPt) {
+            pt = pt->next;
         }
+        
+        pt->blocked = 0;  // Unblock the thread
     }
+    
     OS_EnableInterrupts();
 }
 
-// ******** OS_bWait ************
-// Binary semaphore wait
-void OS_bWait(Sema4Type *semaPt) {
-    OS_DisableInterrupts();
-    while(semaPt->value == 0) {
-        OS_EnableInterrupts();
-        OS_Suspend();
-        OS_DisableInterrupts();
-    }
-    semaPt->value = 0;
-    OS_EnableInterrupts();
+// =============================================================================
+// FIFO IMPLEMENTATION
+// =============================================================================
+
+/**
+ * @brief Initialize FIFO
+ */
+void OS_Fifo_Init(void) {
+    PutI = 0;
+    GetI = 0;
+    OS_InitSemaphore(&CurrentSize, 0);  // Initially empty
+    LostData = 0;
 }
 
-// ******** OS_bSignal ************
-// Binary semaphore signal
-void OS_bSignal(Sema4Type *semaPt) {
-    OS_DisableInterrupts();
-    semaPt->value = 1;
-    OS_EnableInterrupts();
-}
-
-// ******** Scheduler ************
-// Select next thread to run
-// Called from SysTick_Handler every 2ms
-void Scheduler(void) {
-    tcbType *pt;
-    tcbType *bestPt;
-    uint32_t max;
-    
-    // Update sleep counters every 2ms
-    for(uint32_t i = 0; i < NumThreads; i++) {
-        if(tcbs[i].sleepCount > 0) {
-            tcbs[i].sleepCount--;
-        }
+/**
+ * @brief Put data into FIFO (non-blocking)
+ */
+int OS_Fifo_Put(uint32_t data) {
+    if (CurrentSize == FIFOSIZE) {
+        LostData++;
+        return -1;  // FIFO full
     }
     
-    // Update system time
-    MSTime += 2;
+    Fifo[PutI] = data;
+    PutI = (PutI + 1) % FIFOSIZE;
+    OS_Signal(&CurrentSize);  // Increment size
     
-    // Find next runnable thread (round-robin among ready threads)
-    pt = RunPt->next;
-    while(1) {
-        if((pt->sleepCount == 0) && (pt->blockSemaPt == 0)) {
-            // Thread is ready to run
-            RunPt = pt;
-            return;
-        }
-        pt = pt->next;
-        if(pt == RunPt->next) {
-
-            return;
-        }
-    }
+    return 0;  // Success
 }
 
-
-// ******** OS_Time ************
-// Get system time in milliseconds
-uint32_t OS_Time(void) {
-    return MSTime;
-}
-
-// ******** ColorFifo_Init ************
-// Initialize color FIFO
-void ColorFifo_Init(void) {
-    ColorQueue.putPt = ColorQueue.getPt = &ColorQueue.buffer[0];
-    OS_InitSemaphore(&ColorQueue.currentSize, 0);  // Initially empty
-    OS_InitSemaphore(&ColorQueue.roomLeft, FIFOSIZE); // All room available
-    OS_InitSemaphore(&ColorQueue.mutex, 1);        // Binary semaphore for mutual exclusion
-}
-
-// ******** ColorFifo_Put ************
-// Put color into FIFO (blocking if full)
-// Returns: 1 if successful, 0 if failed
-uint32_t ColorFifo_Put(uint8_t color) {
-    OS_Wait(&ColorQueue.roomLeft);  // Block if no room
-    OS_Wait(&ColorQueue.mutex);     // Mutual exclusion
+/**
+ * @brief Get data from FIFO (blocking)
+ */
+uint32_t OS_Fifo_Get(void) {
+    uint32_t data;
     
-    *(ColorQueue.putPt) = color;
-    ColorQueue.putPt++;
-    if(ColorQueue.putPt == &ColorQueue.buffer[FIFOSIZE]) {
-        ColorQueue.putPt = &ColorQueue.buffer[0]; // Wrap
+    OS_Wait(&CurrentSize);  // Block if empty
+    
+    data = Fifo[GetI];
+    GetI = (GetI + 1) % FIFOSIZE;
+    
+    return data;
+}
+
+/**
+ * @brief Peek at next value without removing (non-blocking)
+ */
+uint32_t Get_Next(void) {
+    if (CurrentSize == 0) {
+        return 8;  // Empty indicator
     }
     
-    OS_Signal(&ColorQueue.mutex);
-    OS_Signal(&ColorQueue.currentSize); // One more element
-    return 1;
-}
-
-// ******** ColorFifo_Get ************
-// Get color from FIFO (blocking if empty)
-// Returns: color value
-uint8_t ColorFifo_Get(void) {
-    uint8_t color;
-    
-    OS_Wait(&ColorQueue.currentSize);  // Block if empty
-    OS_Wait(&ColorQueue.mutex);        // Mutual exclusion
-    
-    color = *(ColorQueue.getPt);
-    ColorQueue.getPt++;
-    if(ColorQueue.getPt == &ColorQueue.buffer[FIFOSIZE]) {
-        ColorQueue.getPt = &ColorQueue.buffer[0]; // Wrap
+    if (CurrentSize > 9) {
+        return 8;  // Error indicator
     }
     
-    OS_Signal(&ColorQueue.mutex);
-    OS_Signal(&ColorQueue.roomLeft);  // One more room available
-    return color;
-}
-
-// ******** ColorFifo_Size ************
-// Get current size of FIFO
-uint32_t ColorFifo_Size(void) {
-    return ColorQueue.currentSize.value;
-}
-
-// ******** ColorFifo_IsFull ************
-// Check if FIFO is full
-uint32_t ColorFifo_IsFull(void) {
-    return (ColorQueue.roomLeft.value == 0);
-}
-
-// ******** ColorFifo_IsEmpty ************
-// Check if FIFO is empty
-uint32_t ColorFifo_IsEmpty(void) {
-    return (ColorQueue.currentSize.value == 0);
+    return Fifo[GetI + 1];
 }

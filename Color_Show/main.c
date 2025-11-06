@@ -1,70 +1,129 @@
+// *****************************************************************************
+// user.c - Color Show RTOS Application
+// Runs on LM4F120/TM4C123
+// Uses three threads to demonstrate RTOS with LCD display and RGB LED
+// 
+// Hardware Connections:
+// - Port D (PD0-PD3): Input switches (active high with pull-down)
+//   * PD0: SW5 (button to queue color)
+//   * PD1: SW4 (Red)
+//   * PD2: SW3 (Blue)
+//   * PD3: SW2 (Green)
+// - Port F (PF1-PF3): RGB LED outputs
+//   * PF1: Red LED
+//   * PF2: Blue LED
+//   * PF3: Green LED
+// - LCD connected via LCD.s driver functions
+// *****************************************************************************
+
 #include <stdint.h>
+#include <stdbool.h>
 #include "os.h"
-#include "tm4c123gh6pm.h"
+#include "TM4C123GH6PM.h"
+#include "tm4c123gh6pm_def.h"
 
+// =============================================================================
+// CONFIGURATION CONSTANTS
+// =============================================================================
+#define TIMESLICE               32000U      // 2ms at 16 MHz
+#define TASK1_SLEEP_MS          10U         // Switch check rate
+#define TASK2_SLEEP_MS          50U         // Display update rate
+#define TASK3_TICK_MS           500U        // Timer tick (0.5 seconds)
+#define COUNTDOWN_SECONDS       15U         // Display duration per color
+#define DEBOUNCE_COUNT          5U          // Debounce counter threshold
 
-// Global variables
-volatile uint8_t CurrentColor;      // Color being displayed
-volatile uint8_t NextColor;         // Next color in queue
-volatile uint8_t FormedColor;       // Color formed by switches
-volatile uint32_t ColorTimer;       // 15-second timer
-volatile uint8_t BufferFull;        // Flag for full buffer
+// Port D switch masks
+#define PD_SW5_MASK             0x01U       // PD0 - Queue button
+#define PD_COLOR_MASK           0x0FU       // PD0-PD3 all switches
 
-// Semaphores
-Sema4Type LCDmutex;                // LCD mutual exclusion
-Sema4Type ColorUpdate;             // Signal for color update
-Sema4Type ButtonPressed;           // Signal for button press
+// Port F LED masks
+#define PF_LED_MASK             0x0EU       // PF1-PF3 (RGB LED)
+#define PF_RED                  0x02U       // PF1
+#define PF_BLUE                 0x04U       // PF2
+#define PF_GREEN                0x08U       // PF3
 
-// External LCD functions
+// LCD positions
+#define LCD_LINE1               0x00U       // First line start
+#define LCD_LINE2               0x40U       // Second line start
+#define LCD_SWITCH_POS          0x09U       // "Switches: XXX"
+#define LCD_CURRENT_POS         0x42U       // "C:XXX"
+#define LCD_NEXT_POS            0x49U       // "N:XXX"
+#define LCD_TIMER_POS           0x4EU       // Timer position
+
+// Color encoding (matches switch hardware: GBR format)
+#define COLOR_OFF               0x00U       // 000
+#define COLOR_RED               0x02U       // 010
+#define COLOR_BLUE              0x04U       // 100
+#define COLOR_GREEN             0x08U       // 001
+#define COLOR_CYAN              0x0CU       // 110 (Green + Blue)
+#define COLOR_MAGENTA           0x06U       // 011 (Red + Blue)
+#define COLOR_YELLOW            0x0AU       // 101 (Red + Green)
+#define COLOR_WHITE             0x0EU       // 111 (All)
+
+// =============================================================================
+// EXTERNAL FUNCTIONS (from LCD.s)
+// =============================================================================
 extern void Init_LCD_Ports(void);
 extern void Init_LCD(void);
 extern void Set_Position(uint32_t pos);
 extern void Display_Msg(char *str);
-extern void Display_Char(char c);
+extern void Display_Char(int c);
 
-// Initialize GPIO ports
-void GPIO_Init(void) {
-    SYSCTL_RCGCGPIO_R |= 0x38;    // Enable Ports D, E, F
-    while((SYSCTL_PRGPIO_R & 0x38) == 0) {}; // Wait
-    
-    // Port D for switches (inputs with pull-ups)
-    GPIO_PORTD_DIR_R &= ~0x0F;     // PD0-3 are inputs
-    GPIO_PORTD_DEN_R |= 0x0F;      // Digital enable
-    GPIO_PORTD_PUR_R |= 0x0F;      // Pull-up resistors
-    
-    // Port F for RGB LED (outputs)
-    GPIO_PORTF_LOCK_R = 0x4C4F434B;  // Unlock Port F
-    GPIO_PORTF_CR_R = 0x0E;          // Allow changes to PF1-3
-    GPIO_PORTF_DIR_R |= 0x0E;        // PF1-3 are outputs
-    GPIO_PORTF_DEN_R |= 0x0E;        // Digital enable
-    GPIO_PORTF_DATA_R &= ~0x0E;      // LEDs off initially
+// =============================================================================
+// GLOBAL VARIABLES
+// =============================================================================
+Sema4Type LCD_Mutex;                        // LCD mutual exclusion
+static uint32_t CurrentSwitchData = 0U;     // Current switch state
+static uint32_t DebounceCtr = 0U;           // Debounce counter
+static bool ButtonPressed = false;          // Button state tracker
+static bool DisplayActive = false;          // True when displaying colors
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Read switch state from Port D
+ * @return 4-bit value representing switch state (PD3-PD0)
+ */
+static inline uint32_t ReadSwitches(void) {
+    return (GPIO_PORTD_DATA_R & PD_COLOR_MASK);
 }
 
-// Read switch states and form color
-uint8_t ReadSwitches(void) {
-    uint32_t switches = ~GPIO_PORTD_DATA_R;  // Active low switches
-    uint8_t color = 0;
-    
-    if(switches & 0x08) color |= COLOR_GREEN;  // SW2 - PD3
-    if(switches & 0x04) color |= COLOR_BLUE;   // SW3 - PD2
-    if(switches & 0x02) color |= COLOR_RED;    // SW4 - PD1
-    
-    return color;
+/**
+ * @brief Check if SW5 button is pressed
+ * @return true if pressed (PD0 high), false otherwise
+ */
+static inline bool IsButtonPressed(void) {
+    return ((GPIO_PORTD_DATA_R & PD_SW5_MASK) != 0U);
 }
 
-// Set LED color
-void SetLED(uint8_t color) {
-    GPIO_PORTF_DATA_R = (GPIO_PORTF_DATA_R & ~0x0E) | ((color & 0x07) << 1);
+/**
+ * @brief Set RGB LED color
+ * @param color Color value (GBR format, bits 3-1)
+ */
+static void SetLED(uint32_t color) {
+    uint32_t ledValue = 0U;
+    
+    if (color & 0x08U) ledValue |= PF_GREEN;   // Green bit
+    if (color & 0x04U) ledValue |= PF_BLUE;    // Blue bit
+    if (color & 0x02U) ledValue |= PF_RED;     // Red bit
+    
+    GPIO_PORTF_DATA_R = (GPIO_PORTF_DATA_R & ~PF_LED_MASK) | ledValue;
 }
 
-// Get color name string
-const char* GetColorName(uint8_t color) {
-    switch(color) {
-        case COLOR_BLACK:   return "Blk";
+/**
+ * @brief Get color name string
+ * @param color Color value
+ * @return Pointer to color name string
+ */
+static const char* GetColorName(uint32_t color) {
+    switch (color) {
+        case COLOR_OFF:     return "Off";
         case COLOR_RED:     return "Red";
         case COLOR_BLUE:    return "Blu";
         case COLOR_GREEN:   return "Grn";
-        case COLOR_CYAN:    return "Cyn";
+        case COLOR_CYAN:    return "Cya";
         case COLOR_MAGENTA: return "Mag";
         case COLOR_YELLOW:  return "Yel";
         case COLOR_WHITE:   return "Wht";
@@ -72,189 +131,259 @@ const char* GetColorName(uint8_t color) {
     }
 }
 
-// Update first line of LCD
-void UpdateLCDLine1(void) {
-    OS_Wait(&LCDmutex);
-    Set_Position(0x00);  // First line, leftmost position
-    
-    if(BufferFull) {
-        Display_Msg("  Buffer Full!  ");
-    } else {
-        Display_Msg("Switches: ");
-        Display_Msg((char*)GetColorName(FormedColor));
-        Display_Msg("    ");  // Clear rest of line
-    }
-    
-    OS_Signal(&LCDmutex);
+/**
+ * @brief Check if FIFO is full
+ * @return true if full, false otherwise
+ */
+static inline bool IsFifoFull(void) {
+    return (CurrentSize >= FIFOSIZE);
 }
 
-// Update second line of LCD
-void UpdateLCDLine2(void) {
-    OS_Wait(&LCDmutex);
-    Set_Position(0x40);  // Second line
-    
-    if(ColorFifo_IsEmpty()) {
-        Display_Msg("Input a Color!  ");
-    } else {
-        Display_Msg("C:");
-        Display_Msg((char*)GetColorName(CurrentColor));
-        Display_Msg(" N:");
-        if(ColorFifo_Size() > 0) {
-            Display_Msg((char*)GetColorName(NextColor));
-        } else {
-            Display_Msg("??");
-        }
-        Display_Msg("     ");  // Clear rest
-    }
-    
-    OS_Signal(&LCDmutex);
+/**
+ * @brief Check if FIFO is empty
+ * @return true if empty, false otherwise
+ */
+static inline bool IsFifoEmpty(void) {
+    return (CurrentSize <= 0);
 }
 
-// Debounce delay (10ms minimum)
-void Debounce(void) {
-    OS_Sleep(10);
-}
-
-// Thread 1: Switch Monitor
-// Continuously reads switches and updates formed color
-void SwitchMonitorThread(void) {
-    uint8_t lastColor = 0xFF;
+// =============================================================================
+// THREAD 1: SWITCH MONITOR AND BUTTON HANDLER
+// =============================================================================
+/**
+ * @brief Monitor switches and handle button press with debouncing
+ * @details Reads switch state, debounces button, and queues colors to FIFO
+ */
+void Task1(void) {
+    uint32_t switchSnapshot = 0U;
     
-    while(1) {
-        uint8_t newColor = ReadSwitches();
-        if(newColor != lastColor) {
-            FormedColor = newColor;
-            lastColor = newColor;
-            UpdateLCDLine1();
-        }
-        OS_Sleep(50);  // Check every 50ms
-    }
-}
-
-// Thread 2: Button Handler
-// Handles SW5 button press with debouncing
-void ButtonHandlerThread(void) {
-    uint32_t lastState = 0;
-    
-    while(1) {
-        uint32_t currentState = GPIO_PORTD_DATA_R & 0x01;  // Read PD0 (SW5)
+    while (1) {
+        // Read current switch state
+        CurrentSwitchData = ReadSwitches();
         
-        if((lastState != 0) && (currentState == 0)) {  // Positive edge (active low)
-            Debounce();  // 10ms debounce
+        // Check if switches are being pressed (non-zero)
+        if (CurrentSwitchData != 0x00U) {
+            switchSnapshot = CurrentSwitchData;
             
-            // Check if still pressed after debounce
-            if((GPIO_PORTD_DATA_R & 0x01) == 0) {
-                if(!ColorFifo_IsFull()) {
-                    uint8_t colorToAdd = FormedColor;
-                    ColorFifo_Put(colorToAdd);
+            // Debounce: ensure stable reading
+            while (DebounceCtr < DEBOUNCE_COUNT) {
+                if (ReadSwitches() == switchSnapshot) {
+                    DebounceCtr++;
+                } else {
+                    DebounceCtr = 0U;
+                    switchSnapshot = ReadSwitches();
+                }
+                OS_Sleep(2);  // Small delay for debounce
+            }
+            
+            // After debouncing, check for button press
+            if ((DebounceCtr == DEBOUNCE_COUNT) && 
+                IsButtonPressed() && 
+                !ButtonPressed) {
+                
+                DebounceCtr = 0U;
+                ButtonPressed = true;
+                
+                // Try to add color to FIFO
+                if (!IsFifoFull()) {
+                    OS_Fifo_Put(CurrentSwitchData);
                     
-                    // Check if buffer is now full
-                    BufferFull = ColorFifo_IsFull();
-                    UpdateLCDLine1();
-                    
-                    // Fast start: If queue was empty, update immediately
-                    if(ColorFifo_Size() == 1 && CurrentColor == COLOR_BLACK) {
-                        OS_Signal(&ColorUpdate);
+                    // If this was first item and display ready, trigger update
+                    if (CurrentSize == 1 && DisplayActive) {
+                        OS_Suspend();  // Fast start - trigger display update
                     }
                 }
             }
         }
         
-        lastState = currentState;
-        OS_Sleep(20);  // Check every 20ms
-    }
-}
-
-// Thread 3: Display Thread
-// Updates LED and fetches colors from FIFO
-void DisplayThread(void) {
-    CurrentColor = COLOR_BLACK;
-    NextColor = COLOR_BLACK;
-    SetLED(COLOR_BLACK);
-    
-    while(1) {
-        if(!ColorFifo_IsEmpty()) {
-            CurrentColor = ColorFifo_Get();
-            SetLED(CurrentColor);
-            
-            // Update buffer full status
-            BufferFull = ColorFifo_IsFull();
-            
-            // Check for next color
-            if(!ColorFifo_IsEmpty()) {
-                NextColor = CurrentColor;
-            } else {
-                NextColor = COLOR_BLACK;
-            }
-            
-            UpdateLCDLine2();
-            UpdateLCDLine1();
-        } else {
-            CurrentColor = COLOR_BLACK;
-            NextColor = COLOR_BLACK;
-            SetLED(COLOR_BLACK);
-            UpdateLCDLine2();
+        // Reset button state when released
+        if (!IsButtonPressed()) {
+            ButtonPressed = false;
         }
         
-        // Wait for 15 seconds or early update signal
-        for(int i = 0; i < 150; i++) {  // 150 * 100ms = 15 seconds
-            OS_Sleep(100);
-            // Check for fast start signal
-            if(ColorUpdate.value > 0) {
-                OS_Wait(&ColorUpdate);
-                break;
+        OS_Sleep(TASK1_SLEEP_MS);
+    }
+}
+
+// =============================================================================
+// THREAD 2: LCD DISPLAY UPDATE
+// =============================================================================
+/**
+ * @brief Update LCD display with current switch state and buffer status
+ * @details Shows "Switches: XXX" or "Buffer Full" on line 1
+ */
+void Task2(void) {
+    while (1) {
+        OS_Wait(&LCD_Mutex);
+        
+        // Line 1: Show buffer status or current switches
+        Set_Position(LCD_LINE1);
+        
+        if (IsFifoFull()) {
+            Display_Msg("  Buffer Full!  ");
+        } else {
+            Display_Msg("Switches:");
+            Set_Position(LCD_SWITCH_POS);
+            Display_Msg((char*)GetColorName(CurrentSwitchData));
+            Display_Msg("   ");  // Clear extra characters
+        }
+        
+        OS_Signal(&LCD_Mutex);
+        
+        OS_Sleep(TASK2_SLEEP_MS);
+    }
+}
+
+// =============================================================================
+// THREAD 3: COLOR DISPLAY AND TIMER
+// =============================================================================
+/**
+ * @brief Display colors from FIFO on LED with countdown timer
+ * @details Shows "C:XXX N:XXX 15" format with countdown
+ */
+void Task3(void) {
+    uint32_t currentColor = COLOR_OFF;
+    uint32_t nextColor = COLOR_OFF;
+    uint32_t secondsRemaining = 0U;
+    
+    SetLED(COLOR_OFF);
+    
+    while (1) {
+        // Timer expired or first run
+        if (secondsRemaining == 0U) {
+            SetLED(COLOR_OFF);
+            
+            if (IsFifoEmpty()) {
+                // Show "Input a Color!" message
+                OS_Wait(&LCD_Mutex);
+                Set_Position(LCD_LINE2);
+                Display_Msg("Input a Color!  ");
+                OS_Signal(&LCD_Mutex);
+                
+                DisplayActive = false;
+                secondsRemaining = COUNTDOWN_SECONDS;
+            } else {
+                // Get next color from FIFO
+                currentColor = OS_Fifo_Get();
+                SetLED(currentColor);
+                
+                // Peek at next color
+                if (!IsFifoEmpty()) {
+                    nextColor = Get_Next();
+                } else {
+                    nextColor = 0U;
+                }
+                
+                // Update LCD with C: and N: labels
+                OS_Wait(&LCD_Mutex);
+                Set_Position(LCD_LINE2);
+                Display_Msg("C:");
+                Set_Position(LCD_CURRENT_POS);
+                Display_Msg((char*)GetColorName(currentColor));
+                
+                Set_Position(LCD_NEXT_LABEL);
+                Display_Msg(" N:");
+                Set_Position(LCD_NEXT_POS);
+                
+                if (nextColor != 0U) {
+                    Display_Msg((char*)GetColorName(nextColor));
+                } else {
+                    Display_Msg("?? ");
+                }
+                
+                OS_Signal(&LCD_Mutex);
+                
+                DisplayActive = true;
+                secondsRemaining = COUNTDOWN_SECONDS;
             }
         }
+        
+        // Update countdown timer on LCD
+        OS_Wait(&LCD_Mutex);
+        Set_Position(LCD_TIMER_POS);
+        
+        if (secondsRemaining > 9U) {
+            Display_Char('1');
+            Display_Char((char)((secondsRemaining - 10U) + '0'));
+        } else {
+            Display_Char('0');
+            Display_Char((char)(secondsRemaining + '0'));
+        }
+        
+        OS_Signal(&LCD_Mutex);
+        
+        // Decrement timer
+        secondsRemaining--;
+        
+        OS_Sleep(TASK3_TICK_MS);
     }
 }
 
-// Thread 4: LCD Update Thread
-// Periodic LCD updates
-void LCDUpdateThread(void) {
-    while(1) {
-        UpdateLCDLine2();
-        OS_Sleep(1000);  // Update every second
-    }
+// =============================================================================
+// HARDWARE INITIALIZATION
+// =============================================================================
+
+/**
+ * @brief Initialize Port D for switch inputs
+ */
+static void PortD_Init(void) {
+    SYSCTL_RCGCGPIO_R |= 0x08U;                     // Enable clock for Port D
+    while ((SYSCTL_RCGCGPIO_R & 0x08U) == 0U) {}   // Wait for clock
+    
+    GPIO_PORTD_DIR_R &= ~PD_COLOR_MASK;             // PD0-3 as inputs
+    GPIO_PORTD_DEN_R |= PD_COLOR_MASK;              // Digital enable
+    GPIO_PORTD_PDR_R |= PD_COLOR_MASK;              // Pull-down resistors
 }
 
-// Main function
+/**
+ * @brief Initialize Port F for RGB LED outputs
+ */
+static void PortF_Init(void) {
+    SYSCTL_RCGCGPIO_R |= 0x20U;                     // Enable clock for Port F
+    while ((SYSCTL_RCGCGPIO_R & 0x20U) == 0U) {}   // Wait for clock
+    
+    GPIO_PORTF_DIR_R |= PF_LED_MASK;                // PF1-3 as outputs
+    GPIO_PORTF_DEN_R |= PF_LED_MASK;                // Digital enable
+    GPIO_PORTF_DATA_R &= ~PF_LED_MASK;              // LEDs off initially
+}
+
+// =============================================================================
+// MAIN FUNCTION
+// =============================================================================
 int main(void) {
-    // Initialize hardware
+    // Initialize OS
     OS_Init();
-    GPIO_Init();
+    
+    // Initialize hardware
+    PortD_Init();
+    PortF_Init();
     Init_LCD_Ports();
     Init_LCD();
     
-    // Initialize semaphores
-    OS_InitSemaphore(&LCDmutex, 1);
-    OS_InitSemaphore(&ColorUpdate, 0);
-    OS_InitSemaphore(&ButtonPressed, 0);
+    // Initialize synchronization primitives
+    OS_InitSemaphore(&LCD_Mutex, 1);
+    OS_Fifo_Init();
     
-    // Initialize color FIFO
-    ColorFifo_Init();
+    // Display startup message
+    Set_Position(LCD_LINE1);
+    Display_Msg("  Color Show!   ");
+    Set_Position(LCD_LINE2);
+    Display_Msg(" RTOS Active... ");
     
-    // Initialize global variables
-    CurrentColor = COLOR_BLACK;
-    NextColor = COLOR_BLACK;
-    FormedColor = COLOR_BLACK;
-    BufferFull = 0;
-    ColorTimer = 0;
+    // Small delay to show startup message
+    for (volatile int i = 0; i < 1000000; i++) {}
     
     // Clear display
-    SetLED(COLOR_BLACK);
-    Set_Position(0x00);
-    Display_Msg("Color Show");
-    Set_Position(0x40);
-    Display_Msg("Initializing... ");
+    Set_Position(LCD_LINE1);
+    Display_Msg("                ");
+    Set_Position(LCD_LINE2);
+    Display_Msg("Input a Color!  ");
     
-    // Add threads
-    OS_AddThread(SwitchMonitorThread, 1, 256);
-    OS_AddThread(ButtonHandlerThread, 2, 256);
-    OS_AddThread(DisplayThread, 3, 256);
-    OS_AddThread(LCDUpdateThread, 4, 256);
+    // Add threads to scheduler
+    OS_AddThreads(&Task1, &Task2, &Task3);
     
-    // Launch OS with 2ms time slice
-    OS_Launch(32000);
+    // Launch OS (does not return)
+    OS_Launch(TIMESLICE);
     
-    return 0;
+    return 0;  // Never reached
 }
