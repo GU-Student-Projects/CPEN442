@@ -59,7 +59,7 @@ int OS_AddThreads(void(*task0)(void),
  * @brief Start the scheduler and enable interrupts
  * @param theTimeSlice Number of bus cycles for each time slice (max 24 bits)
  * @note This function does not return - it starts the RTOS
- * @example OS_Launch(32000) for 2ms time slice at 16 MHz
+ * @example OS_Launch(160000) for 2ms time slice at 16 MHz (actually ~10ms at 16MHz)
  */
 void OS_Launch(uint32_t theTimeSlice);
 
@@ -132,8 +132,8 @@ uint32_t OS_Fifo_Get(void);
 
 /**
  * @brief Peek at next item in FIFO without removing it
- * @return Next value in FIFO or 8 if empty/invalid
- * @note Non-blocking, returns 8 if queue empty or invalid
+ * @return Next value in FIFO or 0 if empty
+ * @note Non-blocking, returns 0 if queue empty
  */
 uint32_t Get_Next(void);
 
@@ -173,5 +173,8 @@ extern tcbType tcbs[NUMTHREADS];    // Thread control blocks
 extern tcbType *RunPt;              // Pointer to currently running thread
 extern int32_t CurrentSize;         // Current FIFO size (semaphore)
 extern uint32_t LostData;           // Count of data lost due to full FIFO
+extern uint32_t Fifo[FIFOSIZE];     // FIFO buffer (for Get_Next access)
+extern uint32_t GetI;               // Get index (for Get_Next access)
+extern uint32_t PutI;               // Put index (for Get_Next access)
 
 #endif // __OS_H

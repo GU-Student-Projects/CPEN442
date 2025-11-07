@@ -1,5 +1,5 @@
 // *****************************************************************************
-// user.c - Color Show RTOS Application
+// main.c - Color Show RTOS Application
 // Runs on LM4F120/TM4C123
 // Uses three threads to demonstrate RTOS with LCD display and RGB LED
 // 
@@ -25,40 +25,40 @@
 // =============================================================================
 // CONFIGURATION CONSTANTS
 // =============================================================================
-#define TIMESLICE               32000U      // 2ms at 16 MHz
-#define TASK1_SLEEP_MS          10U         // Switch check rate
-#define TASK2_SLEEP_MS          50U         // Display update rate
-#define TASK3_TICK_MS           500U        // Timer tick (0.5 seconds)
-#define COUNTDOWN_SECONDS       15U         // Display duration per color
-#define DEBOUNCE_COUNT          5U          // Debounce counter threshold
+#define TIMESLICE               32000U       // Time slice for OS
+#define TASK1_SLEEP_MS          10U          // Switch check rate
+#define TASK3_TICK_MS           500U         // Timer tick (500ms)
+#define COUNTDOWN_INPUT_SEC     15U          // Wait time when "Input a Color"
+#define COUNTDOWN_DISPLAY_SEC   5U           // Display duration per color
+#define DEBOUNCE_COUNT          5U           // Debounce counter threshold
 
 // Port D switch masks
-#define PD_SW5_MASK             0x01U       // PD0 - Queue button
-#define PD_COLOR_MASK           0x0FU       // PD0-PD3 all switches
+#define PD_SW5_MASK             0x01U        // PD0 - Queue button
+#define PD_COLOR_MASK           0x0FU        // PD0-PD3 all switches
 
 // Port F LED masks
-#define PF_LED_MASK             0x0EU       // PF1-PF3 (RGB LED)
-#define PF_RED                  0x02U       // PF1
-#define PF_BLUE                 0x04U       // PF2
-#define PF_GREEN                0x08U       // PF3
+#define PF_LED_MASK             0x0EU        // PF1-PF3 (RGB LED)
+#define PF_RED                  0x02U        // PF1
+#define PF_BLUE                 0x04U        // PF2
+#define PF_GREEN                0x08U        // PF3
 
 // LCD positions
-#define LCD_LINE1               0x00U       // First line start
-#define LCD_LINE2               0x40U       // Second line start
-#define LCD_SWITCH_POS          0x09U       // "Switches: XXX"
-#define LCD_CURRENT_POS         0x42U       // "C:XXX"
-#define LCD_NEXT_POS            0x49U       // "N:XXX"
-#define LCD_TIMER_POS           0x4EU       // Timer position
+#define LCD_LINE1               0x00U        // First line start
+#define LCD_LINE2               0x40U        // Second line start
+#define LCD_SWITCH_POS          0x09U        // "Switches: XXX"
+#define LCD_CURRENT_POS         0x42U        // "C:XXX"
+#define LCD_NEXT_POS            0x49U        // "N:XXX"
+#define LCD_TIMER_POS           0x4EU        // Timer position
 
 // Color encoding (matches switch hardware: GBR format)
-#define COLOR_OFF               0x00U       // 000
-#define COLOR_RED               0x02U       // 010
-#define COLOR_BLUE              0x04U       // 100
-#define COLOR_GREEN             0x08U       // 001
-#define COLOR_CYAN              0x0CU       // 110 (Green + Blue)
-#define COLOR_MAGENTA           0x06U       // 011 (Red + Blue)
-#define COLOR_YELLOW            0x0AU       // 101 (Red + Green)
-#define COLOR_WHITE             0x0EU       // 111 (All)
+#define COLOR_OFF               0x00U        // 000
+#define COLOR_RED               0x02U        // 010
+#define COLOR_BLUE              0x04U        // 100
+#define COLOR_GREEN             0x08U        // 001
+#define COLOR_CYAN              0x0CU        // 110 (Green + Blue)
+#define COLOR_MAGENTA           0x06U        // 011 (Red + Blue)
+#define COLOR_YELLOW            0x0AU        // 101 (Red + Green)
+#define COLOR_WHITE             0x0EU        // 111 (All)
 
 // =============================================================================
 // EXTERNAL FUNCTIONS (from LCD.s)
@@ -158,27 +158,34 @@ void Task1(void) {
     uint32_t switchSnapshot = 0U;
     
     while (1) {
-        // Read current switch state
-        CurrentSwitchData = ReadSwitches();
+        // Reset button state when released
+        if ((GPIO_PORTD_DATA_R & PD_SW5_MASK) == 0U) {
+            ButtonPressed = false;
+        }
         
-        // Check if switches are being pressed (non-zero)
-        if (CurrentSwitchData != 0x00U) {
-            switchSnapshot = CurrentSwitchData;
+        // Read current switch state ONLY when not displaying a color
+        if (!DisplayActive) {
+            CurrentSwitchData = GPIO_PORTD_DATA_R & PD_COLOR_MASK;
+        } else {
+            CurrentSwitchData = 0U;  // Force "Off" during color display
+        }
+        
+        // Check if switches are being pressed (non-zero) and not displaying
+        if (!DisplayActive && (GPIO_PORTD_DATA_R & PD_COLOR_MASK) != 0x00U) {
+            switchSnapshot = (GPIO_PORTD_DATA_R & PD_COLOR_MASK);
             
             // Debounce: ensure stable reading
             while (DebounceCtr < DEBOUNCE_COUNT) {
-                if (ReadSwitches() == switchSnapshot) {
+                if ((GPIO_PORTD_DATA_R & PD_COLOR_MASK) == switchSnapshot) {
                     DebounceCtr++;
                 } else {
                     DebounceCtr = 0U;
-                    switchSnapshot = ReadSwitches();
                 }
-                OS_Sleep(2);  // Small delay for debounce
             }
             
             // After debouncing, check for button press
             if ((DebounceCtr == DEBOUNCE_COUNT) && 
-                IsButtonPressed() && 
+                ((GPIO_PORTD_DATA_R & PD_SW5_MASK) == 1U) && 
                 !ButtonPressed) {
                 
                 DebounceCtr = 0U;
@@ -187,18 +194,8 @@ void Task1(void) {
                 // Try to add color to FIFO
                 if (!IsFifoFull()) {
                     OS_Fifo_Put(CurrentSwitchData);
-                    
-                    // If this was first item and display ready, trigger update
-                    if (CurrentSize == 1 && DisplayActive) {
-                        OS_Suspend();  // Fast start - trigger display update
-                    }
                 }
             }
-        }
-        
-        // Reset button state when released
-        if (!IsButtonPressed()) {
-            ButtonPressed = false;
         }
         
         OS_Sleep(TASK1_SLEEP_MS);
@@ -213,24 +210,34 @@ void Task1(void) {
  * @details Shows "Switches: XXX" or "Buffer Full" on line 1
  */
 void Task2(void) {
+    uint32_t lastSwitchData = 0xFFU;  // Track last displayed value
+    bool lastBufferFull = false;       // Track last buffer state
+    
     while (1) {
-        OS_Wait(&LCD_Mutex);
+        bool currentBufferFull = IsFifoFull();
         
-        // Line 1: Show buffer status or current switches
-        Set_Position(LCD_LINE1);
-        
-        if (IsFifoFull()) {
-            Display_Msg("  Buffer Full!  ");
-        } else {
-            Display_Msg("Switches:");
-            Set_Position(LCD_SWITCH_POS);
-            Display_Msg((char*)GetColorName(CurrentSwitchData));
-            Display_Msg("   ");  // Clear extra characters
+        // Only update if something changed
+        if ((CurrentSwitchData != lastSwitchData) || (currentBufferFull != lastBufferFull)) {
+            OS_Wait(&LCD_Mutex);
+            
+            // Clear and update line 1
+            Set_Position(LCD_LINE1);
+            
+            if (currentBufferFull) {
+                Display_Msg("  Buffer Full!  ");
+            } else {
+                Display_Msg("Switches:");
+                Display_Msg((char*)GetColorName(CurrentSwitchData));
+                Display_Msg("    ");  // Clear trailing characters
+            }
+            
+            OS_Signal(&LCD_Mutex);
+            
+            lastSwitchData = CurrentSwitchData;
+            lastBufferFull = currentBufferFull;
         }
         
-        OS_Signal(&LCD_Mutex);
-        
-        OS_Sleep(TASK2_SLEEP_MS);
+        // No sleep - run continuously to ensure scheduler always has a ready thread
     }
 }
 
@@ -245,77 +252,142 @@ void Task3(void) {
     uint32_t currentColor = COLOR_OFF;
     uint32_t nextColor = COLOR_OFF;
     uint32_t secondsRemaining = 0U;
+    uint32_t displayTimer = COUNTDOWN_INPUT_SEC;  // Start in input mode
     
     SetLED(COLOR_OFF);
     
     while (1) {
-        // Timer expired or first run
+        // Timer expired - check for new color
         if (secondsRemaining == 0U) {
-            SetLED(COLOR_OFF);
+            GPIO_PORTF_DATA_R = 0x00U;
             
-            if (IsFifoEmpty()) {
-                // Show "Input a Color!" message
-                OS_Wait(&LCD_Mutex);
-                Set_Position(LCD_LINE2);
-                Display_Msg("Input a Color!  ");
-                OS_Signal(&LCD_Mutex);
+            if (!IsFifoEmpty()) {
+                // COLOR DISPLAY MODE - use shorter timer
+                secondsRemaining = COUNTDOWN_DISPLAY_SEC;
+                displayTimer = COUNTDOWN_DISPLAY_SEC;
                 
-                DisplayActive = false;
-                secondsRemaining = COUNTDOWN_SECONDS;
-            } else {
-                // Get next color from FIFO
                 currentColor = OS_Fifo_Get();
-                SetLED(currentColor);
                 
-                // Peek at next color
-                if (!IsFifoEmpty()) {
+                // Set LED based on color (mask out button bit and map to LED pins)
+                uint32_t ledValue = 0U;
+                if (currentColor & 0x08U) ledValue |= PF_GREEN;  // Green
+                if (currentColor & 0x04U) ledValue |= PF_BLUE;   // Blue
+                if (currentColor & 0x02U) ledValue |= PF_RED;    // Red
+                GPIO_PORTF_DATA_R = ledValue;
+                
+                // Get next color from queue
+                if (CurrentSize > 0) {
                     nextColor = Get_Next();
                 } else {
-                    nextColor = 0U;
+                    nextColor = 8U;  // No next color
                 }
                 
-                // Update LCD with C: and N: labels
                 OS_Wait(&LCD_Mutex);
                 Set_Position(LCD_LINE2);
                 Display_Msg("C:");
-                Set_Position(LCD_CURRENT_POS);
-                Display_Msg((char*)GetColorName(currentColor));
                 
-                Set_Position(LCD_NEXT_LABEL);
-                Display_Msg(" N:");
-                Set_Position(LCD_NEXT_POS);
-                
-                if (nextColor != 0U) {
-                    Display_Msg((char*)GetColorName(nextColor));
-                } else {
-                    Display_Msg("?? ");
+                // Display current color (match hardware values with button bit)
+                switch (currentColor) {
+                    case 0x09:  // green + button
+                        Display_Msg("Grn");
+                        break;
+                    case 0x05:  // blue + button
+                        Display_Msg("Blu");
+                        break;
+                    case 0x03:  // red + button
+                        Display_Msg("Red");
+                        break;
+                    case 0x0D:  // cyan + button
+                        Display_Msg("Cya");
+                        break;
+                    case 0x0B:  // yellow + button
+                        Display_Msg("Yel");
+                        break;
+                    case 0x07:  // magenta + button
+                        Display_Msg("Mag");
+                        break;
+                    case 0x0F:  // white + button
+                        Display_Msg("Wht");
+                        break;
+                    default:
+                        Display_Msg("???");
+                        break;
                 }
                 
+                Display_Msg(" N:");
+                
+                // Display next color
+                if (nextColor != 8U) {
+                    switch (nextColor) {
+                        case 0x09:  // green
+                            Display_Msg("Grn");
+                            break;
+                        case 0x05:  // blue
+                            Display_Msg("Blu");
+                            break;
+                        case 0x03:  // red
+                            Display_Msg("Red");
+                            break;
+                        case 0x0D:  // cyan
+                            Display_Msg("Cya");
+                            break;
+                        case 0x0B:  // yellow
+                            Display_Msg("Yel");
+                            break;
+                        case 0x07:  // magenta
+                            Display_Msg("Mag");
+                            break;
+                        case 0x0F:  // white
+                            Display_Msg("Wht");
+                            break;
+                        default:
+                            Display_Msg("???");
+                            break;
+                    }
+                } else {
+                    Display_Msg("???");
+                }
+                
+                Display_Msg("  ");
                 OS_Signal(&LCD_Mutex);
                 
                 DisplayActive = true;
-                secondsRemaining = COUNTDOWN_SECONDS;
+            } else {
+                // INPUT MODE - use longer timer
+                secondsRemaining = COUNTDOWN_INPUT_SEC;
+                displayTimer = COUNTDOWN_INPUT_SEC;
+                
+                OS_Wait(&LCD_Mutex);
+                Set_Position(LCD_LINE2);
+                Display_Msg("Input a Color   ");
+                OS_Signal(&LCD_Mutex);
+                
+                DisplayActive = false;
             }
         }
         
-        // Update countdown timer on LCD
+        // Update timer display ALWAYS
         OS_Wait(&LCD_Mutex);
         Set_Position(LCD_TIMER_POS);
-        
-        if (secondsRemaining > 9U) {
+        if (displayTimer > 9U) {
             Display_Char('1');
-            Display_Char((char)((secondsRemaining - 10U) + '0'));
+            Display_Char((char)((displayTimer - 10U) + '0'));
         } else {
             Display_Char('0');
-            Display_Char((char)(secondsRemaining + '0'));
+            Display_Char((char)(displayTimer + '0'));
         }
-        
         OS_Signal(&LCD_Mutex);
         
-        // Decrement timer
-        secondsRemaining--;
-        
+        // Sleep for 500ms
         OS_Sleep(TASK3_TICK_MS);
+        
+        // Decrement both counters
+        if (secondsRemaining > 0U) {
+            secondsRemaining--;
+        }
+        if (displayTimer > 0U) {
+            displayTimer--;
+        }
     }
 }
 
@@ -373,9 +445,9 @@ int main(void) {
     // Small delay to show startup message
     for (volatile int i = 0; i < 1000000; i++) {}
     
-    // Clear display
+    // Clear display - set initial state
     Set_Position(LCD_LINE1);
-    Display_Msg("                ");
+    Display_Msg("Switches:Off    ");
     Set_Position(LCD_LINE2);
     Display_Msg("Input a Color!  ");
     
@@ -387,3 +459,7 @@ int main(void) {
     
     return 0;  // Never reached
 }
+
+// =============================================================================
+// END OF FILE
+// =============================================================================

@@ -183,7 +183,7 @@ int Flash_Erase(uint32_t addr);
  * @param clk_khz System clock in kHz
  * @return 0 on success, non-zero on failure
  */
-int Flash_Init(uint32_t clk_khz);
+void Flash_Init(uint8_t systemClockFreqMHz);
 
 // =============================================================================
 // UTILITY FUNCTIONS

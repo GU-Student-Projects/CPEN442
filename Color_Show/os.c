@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include "os.h"
 #include "TM4C123GH6PM.h"
+#include "tm4c123gh6pm_def.h"
 
 // =============================================================================
 // PRIVATE FUNCTION PROTOTYPES
@@ -24,9 +25,9 @@ tcbType *RunPt;                             // Pointer to currently running thre
 int32_t Stacks[NUMTHREADS][STACKSIZE];     // Thread stacks
 
 // FIFO variables
-static uint32_t PutI;                       // Index for next put
-static uint32_t GetI;                       // Index for next get
-static uint32_t Fifo[FIFOSIZE];            // FIFO buffer
+uint32_t PutI;                              // Index for next put (exported for Get_Next)
+uint32_t GetI;                              // Index for next get (exported for Get_Next)
+uint32_t Fifo[FIFOSIZE];                    // FIFO buffer (exported for Get_Next)
 int32_t CurrentSize;                        // Semaphore: current FIFO size
 uint32_t LostData;                          // Count of lost data (overflow)
 
@@ -48,11 +49,11 @@ void OS_Init(void) {
 }
 
 /**
- * @brief Initialize clock to 16 MHz using main oscillator
+ * @brief Initialize clock (matches working configuration)
  */
 static void Clock_Init(void) {
-    SYSCTL_RCC_R |= 0x00000810;            // Set BYPASS and use main OSC
-    SYSCTL_RCC_R &= ~0x00400020;           // Clear USESYSDIV and OSCSRC bits
+    SYSCTL_RCC_R |= 0x810;
+    SYSCTL_RCC_R &= ~(0x400020);
 }
 
 // =============================================================================
@@ -109,7 +110,7 @@ int OS_AddThreads(void(*task0)(void),
     SetInitialStack(2);
     Stacks[2][STACKSIZE - 2] = (int32_t)(task2);  // PC
     
-    // Initialize thread states
+    // Initialize thread states - CRITICAL for proper operation
     tcbs[0].blocked = 0;
     tcbs[0].sleep = 0;
     tcbs[1].blocked = 0;
@@ -156,23 +157,18 @@ void OS_Sleep(uint32_t sleepTime) {
  * @brief Round-robin scheduler with sleep and blocking support
  * @note Called from SysTick_Handler in osasm.s
  */
-void Scheduler(void) {
-    tcbType *pt;
-    
-    // Decrement sleep counters for all threads
-    pt = RunPt;
-    for (int i = 0; i < NUMTHREADS; i++) {
-        if (pt->sleep > 0) {
-            pt->sleep--;
-        }
-        pt = pt->next;
-    }
-    
-    // Find next ready thread (not blocked and not sleeping)
+void Scheduler(void){
+  // Decrement sleep counters for all threads every 2 ms timeslice
+  tcbType *pt = RunPt;
+  for(int i=0;i<NUMTHREADS;i++){
+    if(pt->sleep > 0){ pt->sleep--; }
+    pt = pt->next;
+  }
+  // Find the next thread that is not blocked and not sleeping
+  RunPt = RunPt->next;
+  while((RunPt->blocked != 0) || (RunPt->sleep > 0)){
     RunPt = RunPt->next;
-    while ((RunPt->blocked != 0) || (RunPt->sleep > 0)) {
-        RunPt = RunPt->next;
-    }
+  }
 }
 
 // =============================================================================
@@ -183,11 +179,9 @@ void Scheduler(void) {
  * @brief Initialize semaphore
  */
 void OS_InitSemaphore(Sema4Type *semaPt, int32_t value) {
-    int32_t status;
-    
-    status = StartCritical();
+    OS_DisableInterrupts();
     *semaPt = value;
-    EndCritical(status);
+    OS_EnableInterrupts();
 }
 
 /**
@@ -277,16 +271,18 @@ uint32_t OS_Fifo_Get(void) {
 }
 
 /**
- * @brief Peek at next value without removing (non-blocking)
+ * @brief Peek at next value without removing
+ * @note This is called AFTER OS_Fifo_Get, so GetI already points to the next item
  */
-uint32_t Get_Next(void) {
-    if (CurrentSize == 0) {
-        return 8;  // Empty indicator
+uint32_t Get_Next(void){
+    if(CurrentSize <= 0){
+        return 8;  // No next item (queue empty)
     }
-    
-    if (CurrentSize > 9) {
-        return 8;  // Error indicator
+    else if(CurrentSize > FIFOSIZE){
+        return 8;  // Error
     }
-    
-    return Fifo[GetI + 1];
+    else{
+        // GetI already points to next item (it was incremented by OS_Fifo_Get)
+        return Fifo[GetI];
+    }
 }
