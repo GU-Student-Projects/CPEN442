@@ -19,9 +19,6 @@ uint8_t RAM_FAT[FAT_SIZE];                 // FAT loaded in RAM
 // INITIALIZATION
 // =============================================================================
 
-/**
- * @brief Initialize file system structures in RAM
- */
 void OS_FS_Init(void) {
     uint16_t i;
     
@@ -40,9 +37,6 @@ void OS_FS_Init(void) {
 // FILE OPERATIONS
 // =============================================================================
 
-/**
- * @brief Create a new file and return its file number
- */
 uint8_t OS_File_New(void) {
     uint16_t i;
     
@@ -64,9 +58,6 @@ uint8_t OS_File_New(void) {
     return FS_ERROR;
 }
 
-/**
- * @brief Get the size of a file in sectors
- */
 uint8_t OS_File_Size(uint8_t num) {
     uint8_t count = 0;
     uint8_t sector;
@@ -97,9 +88,6 @@ uint8_t OS_File_Size(uint8_t num) {
     return count;
 }
 
-/**
- * @brief Append 512 bytes to a file
- */
 uint8_t OS_File_Append(uint8_t num, uint8_t buf[512]) {
     uint8_t freeSector;
     
@@ -125,9 +113,6 @@ uint8_t OS_File_Append(uint8_t num, uint8_t buf[512]) {
     return FS_SUCCESS;
 }
 
-/**
- * @brief Read 512 bytes from a file at specified location
- */
 uint8_t OS_File_Read(uint8_t num, uint8_t location, uint8_t buf[512]) {
     uint8_t i;
     uint8_t sector;
@@ -172,9 +157,6 @@ uint8_t OS_File_Read(uint8_t num, uint8_t location, uint8_t buf[512]) {
 // PERSISTENCE OPERATIONS
 // =============================================================================
 
-/**
- * @brief Write directory and FAT to flash (sector 255)
- */
 uint8_t OS_File_Flush(void) {
     uint8_t buffer[SECTOR_SIZE];
     uint16_t i;
@@ -198,9 +180,6 @@ uint8_t OS_File_Flush(void) {
     return FS_SUCCESS;
 }
 
-/**
- * @brief Load directory and FAT from flash (sector 255)
- */
 uint8_t OS_File_Mount(void) {
     uint8_t buffer[SECTOR_SIZE];
     uint16_t i;
@@ -229,9 +208,6 @@ uint8_t OS_File_Mount(void) {
     return FS_SUCCESS;
 }
 
-/**
- * @brief Erase all files and format the disk
- */
 uint8_t OS_File_Format(void) {
     uint32_t address;
     int result;
@@ -259,9 +235,6 @@ uint8_t OS_File_Format(void) {
 // HELPER FUNCTIONS
 // =============================================================================
 
-/**
- * @brief Find the first free (unused) sector
- */
 uint8_t find_free_sector(void) {
     int16_t firstFreeSector = -1;
     int16_t lastUsedSector = -1;
@@ -292,9 +265,6 @@ uint8_t find_free_sector(void) {
     return (uint8_t)firstFreeSector;
 }
 
-/**
- * @brief Find the last sector in a file's chain
- */
 uint8_t last_sector(uint8_t start) {
     uint8_t current;
     uint8_t next;
@@ -326,9 +296,6 @@ uint8_t last_sector(uint8_t start) {
     }
 }
 
-/**
- * @brief Append a sector to a file's FAT chain
- */
 void append_fat(uint8_t num, uint8_t n) {
     uint8_t current;
     uint8_t next;
@@ -362,9 +329,6 @@ void append_fat(uint8_t num, uint8_t n) {
 // LOW-LEVEL DISK FUNCTIONS
 // =============================================================================
 
-/**
- * @brief Write 512 bytes to a flash sector
- */
 uint8_t eDisk_WriteSector(uint8_t buf[512], uint8_t n) {
     uint32_t addr;
     uint32_t dataWord;
@@ -392,9 +356,6 @@ uint8_t eDisk_WriteSector(uint8_t buf[512], uint8_t n) {
     return 0;  // Success
 }
 
-/**
- * @brief Read 512 bytes from a flash sector
- */
 uint8_t eDisk_ReadSector(uint8_t buf[512], uint8_t n) {
     uint32_t addr;
     uint8_t *flashPtr;
@@ -416,9 +377,6 @@ uint8_t eDisk_ReadSector(uint8_t buf[512], uint8_t n) {
 // UTILITY FUNCTIONS
 // =============================================================================
 
-/**
- * @brief Get file system status information
- */
 void OS_FS_GetStatus(FS_Status_t *status) {
     uint16_t i;
     uint8_t totalFiles = 0;
@@ -459,9 +417,6 @@ void OS_FS_GetStatus(FS_Status_t *status) {
     status->freeSectors = METADATA_SECTOR - usedSectors;  // Sector 255 reserved
 }
 
-/**
- * @brief Check if a file number is valid and exists
- */
 uint8_t OS_File_Exists(uint8_t num) {
     if (num > MAX_FILE_NUMBER) {
         return 0;  // Invalid file number
@@ -470,9 +425,6 @@ uint8_t OS_File_Exists(uint8_t num) {
     return (RAM_Directory[num] != FILE_EMPTY) ? 1 : 0;
 }
 
-/**
- * @brief Get number of free sectors remaining
- */
 uint8_t OS_FS_FreeSectors(void) {
     uint8_t freeSector = find_free_sector();
     

@@ -36,11 +36,6 @@ typedef int32_t Sema4Type;
 // CORE OS FUNCTIONS
 // =============================================================================
 
-/**
- * @brief Initialize operating system
- * @details Disables interrupts, sets up 16 MHz clock, configures SysTick
- * @note Must be called before any other OS functions
- */
 void OS_Init(void);
 
 /**
@@ -55,119 +50,48 @@ int OS_AddThreads(void(*task0)(void),
                   void(*task1)(void), 
                   void(*task2)(void));
 
-/**
- * @brief Start the scheduler and enable interrupts
- * @param theTimeSlice Number of bus cycles for each time slice (max 24 bits)
- * @note This function does not return - it starts the RTOS
- * @example OS_Launch(160000) for 2ms time slice at 16 MHz (actually ~10ms at 16MHz)
- */
 void OS_Launch(uint32_t theTimeSlice);
 
-/**
- * @brief Force immediate context switch
- * @details Triggers SysTick interrupt to switch to next ready thread
- */
 void OS_Suspend(void);
 
-/**
- * @brief Put calling thread to sleep
- * @param sleepTime Sleep duration in milliseconds
- * @note Thread becomes unschedulable for specified time
- * @note Uses time slice for timing (set by OS_Launch)
- */
 void OS_Sleep(uint32_t sleepTime);
 
 // =============================================================================
 // SEMAPHORE FUNCTIONS
 // =============================================================================
 
-/**
- * @brief Initialize a semaphore
- * @param semaPt Pointer to semaphore variable
- * @param value Initial value (typically 0 for signaling, 1 for mutex)
- * @note Must be called before using semaphore
- */
 void OS_InitSemaphore(Sema4Type *semaPt, int32_t value);
 
-/**
- * @brief Wait on a semaphore (P operation)
- * @param semaPt Pointer to semaphore variable
- * @details Decrements semaphore; blocks if result is negative
- * @note Blocking puts thread in blocked state until OS_Signal called
- */
 void OS_Wait(Sema4Type *semaPt);
 
-/**
- * @brief Signal a semaphore (V operation)
- * @param semaPt Pointer to semaphore variable
- * @details Increments semaphore; wakes one blocked thread if any
- */
 void OS_Signal(Sema4Type *semaPt);
 
 // =============================================================================
-// FIFO FUNCTIONS (Producer-Consumer Buffer)
+// FIFO FUNCTIONS
 // =============================================================================
 
-/**
- * @brief Initialize the FIFO buffer
- * @details Resets put/get indices and initializes size semaphore
- * @note Must be called before using FIFO
- */
 void OS_Fifo_Init(void);
 
-/**
- * @brief Put data into FIFO (non-blocking)
- * @param data 32-bit data to store
- * @return 0 if successful, -1 if FIFO is full
- * @note Does not block if full - returns error instead
- */
 int OS_Fifo_Put(uint32_t data);
 
-/**
- * @brief Get data from FIFO (blocking)
- * @return 32-bit data from FIFO
- * @note Blocks if FIFO is empty until data available
- */
 uint32_t OS_Fifo_Get(void);
 
-/**
- * @brief Peek at next item in FIFO without removing it
- * @return Next value in FIFO or 0 if empty
- * @note Non-blocking, returns 0 if queue empty
- */
 uint32_t Get_Next(void);
 
 // =============================================================================
 // INTERRUPT CONTROL FUNCTIONS
 // =============================================================================
 
-/**
- * @brief Disable interrupts (set I bit in PRIMASK)
- * @note Used for critical sections
- */
 void OS_DisableInterrupts(void);
 
-/**
- * @brief Enable interrupts (clear I bit in PRIMASK)
- * @note Re-enables interrupts after critical section
- */
 void OS_EnableInterrupts(void);
 
-/**
- * @brief Start critical section (returns previous interrupt state)
- * @return Previous PRIMASK value
- * @note Use with EndCritical for nested critical sections
- */
 int32_t StartCritical(void);
 
-/**
- * @brief End critical section (restore previous interrupt state)
- * @param primask Previous PRIMASK value from StartCritical
- */
 void EndCritical(int32_t primask);
 
 // =============================================================================
-// GLOBAL VARIABLES (Exported from os.c)
+// GLOBAL VARIABLES
 // =============================================================================
 extern tcbType tcbs[NUMTHREADS];    // Thread control blocks
 extern tcbType *RunPt;              // Pointer to currently running thread

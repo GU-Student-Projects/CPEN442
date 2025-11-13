@@ -82,26 +82,14 @@ static bool DisplayActive = false;          // True when displaying colors
 // HELPER FUNCTIONS
 // =============================================================================
 
-/**
- * @brief Read switch state from Port D
- * @return 4-bit value representing switch state (PD3-PD0)
- */
 static inline uint32_t ReadSwitches(void) {
     return (GPIO_PORTD_DATA_R & PD_COLOR_MASK);
 }
 
-/**
- * @brief Check if SW5 button is pressed
- * @return true if pressed (PD0 high), false otherwise
- */
 static inline bool IsButtonPressed(void) {
     return ((GPIO_PORTD_DATA_R & PD_SW5_MASK) != 0U);
 }
 
-/**
- * @brief Set RGB LED color
- * @param color Color value (GBR format, bits 3-1)
- */
 static void SetLED(uint32_t color) {
     uint32_t ledValue = 0U;
     
@@ -112,11 +100,6 @@ static void SetLED(uint32_t color) {
     GPIO_PORTF_DATA_R = (GPIO_PORTF_DATA_R & ~PF_LED_MASK) | ledValue;
 }
 
-/**
- * @brief Get color name string
- * @param color Color value
- * @return Pointer to color name string
- */
 static const char* GetColorName(uint32_t color) {
     switch (color) {
         case COLOR_OFF:     return "Off";
@@ -131,18 +114,10 @@ static const char* GetColorName(uint32_t color) {
     }
 }
 
-/**
- * @brief Check if FIFO is full
- * @return true if full, false otherwise
- */
 static inline bool IsFifoFull(void) {
     return (CurrentSize >= FIFOSIZE);
 }
 
-/**
- * @brief Check if FIFO is empty
- * @return true if empty, false otherwise
- */
 static inline bool IsFifoEmpty(void) {
     return (CurrentSize <= 0);
 }
@@ -150,10 +125,7 @@ static inline bool IsFifoEmpty(void) {
 // =============================================================================
 // THREAD 1: SWITCH MONITOR AND BUTTON HANDLER
 // =============================================================================
-/**
- * @brief Monitor switches and handle button press with debouncing
- * @details Reads switch state, debounces button, and queues colors to FIFO
- */
+
 void Task1(void) {
     uint32_t switchSnapshot = 0U;
     
@@ -163,7 +135,7 @@ void Task1(void) {
             ButtonPressed = false;
         }
         
-        // Read current switch state ONLY when not displaying a color
+        // Read current switch state only when not displaying a color
         if (!DisplayActive) {
             CurrentSwitchData = GPIO_PORTD_DATA_R & PD_COLOR_MASK;
         } else {
@@ -205,10 +177,7 @@ void Task1(void) {
 // =============================================================================
 // THREAD 2: LCD DISPLAY UPDATE
 // =============================================================================
-/**
- * @brief Update LCD display with current switch state and buffer status
- * @details Shows "Switches: XXX" or "Buffer Full" on line 1
- */
+
 void Task2(void) {
     uint32_t lastSwitchData = 0xFFU;  // Track last displayed value
     bool lastBufferFull = false;       // Track last buffer state
@@ -244,10 +213,7 @@ void Task2(void) {
 // =============================================================================
 // THREAD 3: COLOR DISPLAY AND TIMER
 // =============================================================================
-/**
- * @brief Display colors from FIFO on LED with countdown timer
- * @details Shows "C:XXX N:XXX 15" format with countdown
- */
+
 void Task3(void) {
     uint32_t currentColor = COLOR_OFF;
     uint32_t nextColor = COLOR_OFF;
@@ -286,7 +252,7 @@ void Task3(void) {
                 Set_Position(LCD_LINE2);
                 Display_Msg("C:");
                 
-                // Display current color (match hardware values with button bit)
+                // Display current color
                 switch (currentColor) {
                     case 0x09:  // green + button
                         Display_Msg("Grn");
@@ -395,9 +361,6 @@ void Task3(void) {
 // HARDWARE INITIALIZATION
 // =============================================================================
 
-/**
- * @brief Initialize Port D for switch inputs
- */
 static void PortD_Init(void) {
     SYSCTL_RCGCGPIO_R |= 0x08U;                     // Enable clock for Port D
     while ((SYSCTL_RCGCGPIO_R & 0x08U) == 0U) {}   // Wait for clock
@@ -407,9 +370,6 @@ static void PortD_Init(void) {
     GPIO_PORTD_PDR_R |= PD_COLOR_MASK;              // Pull-down resistors
 }
 
-/**
- * @brief Initialize Port F for RGB LED outputs
- */
 static void PortF_Init(void) {
     SYSCTL_RCGCGPIO_R |= 0x20U;                     // Enable clock for Port F
     while ((SYSCTL_RCGCGPIO_R & 0x20U) == 0U) {}   // Wait for clock
