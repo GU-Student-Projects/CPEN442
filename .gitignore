@@ -61,3 +61,5 @@ RTE/
 *.uvprojx
 *.uvoptx
 *.scvd
+
+.vscode/*
